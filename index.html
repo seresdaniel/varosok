@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <title>Találd el a várost – Magyarország (kontrasztos, zöld határok & folyók)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#171a21; --text:#e8e8e8; --muted:#9aa0a6; --accent:#4cc9f0;
+      --good:#23d18b; --bad:#ff5370; --warn:#ffd166; --green:#00e676;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+    #app{display:grid;grid-template-rows:auto auto 1fr auto;gap:10px;height:100%;}
+    header{padding:12px 14px 0;}
+    header h1{margin:0;font-size:20px;color:var(--accent);font-weight:700}
+    #controls{display:flex;flex-wrap:wrap;gap:10px;padding:0 14px 4px;align-items:center}
+    .pill{background:var(--panel);border:1px solid #232733;border-radius:10px;padding:8px 10px;display:flex;gap:8px;align-items:center}
+    .cityName{font-size:28px;font-weight:800}
+    .btn{background:#232733;color:var(--text);border:1px solid #2b3040;padding:8px 12px;border-radius:10px;cursor:pointer;font-weight:600}
+    .btn:hover{filter:brightness(1.08)}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    input[type="number"]{width:80px;background:#0f1115;color:var(--text);border:1px solid #2b3040;border-radius:8px;padding:6px 8px}
+    #map{height:100%;border-top:1px solid #232733;border-bottom:1px solid #232733;position:relative}
+    #stats{display:flex;flex-wrap:wrap;gap:10px;padding:8px 14px 14px}
+    .stat{background:var(--panel);border:1px solid #232733;border-radius:10px;padding:10px 12px}
+    .stat b{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+    .stat .val{font-size:18px;font-weight:800}
+    .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+    .roundBanner{position:absolute;top:12px;right:12px;background:#141722e6;border:1px solid #2b3040;padding:10px 12px;border-radius:12px;z-index:400;backdrop-filter:blur(6px)}
+    .legend{position:absolute;bottom:14px;left:14px;z-index:400;background:#141722e6;border:1px solid #2b3040;border-radius:10px;padding:8px 10px;font-size:12px}
+    .legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px}
+
+    /* Alap csempén enyhe világosítás/kontraszt, hogy ne legyen „teli fekete” */
+    #map .leaflet-tile-pane .leaflet-layer:nth-child(1) .leaflet-tile{
+      filter:brightness(1.12) contrast(1.12) saturate(1.05);
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header><h1>Találd el a várost – Magyarország</h1></header>
+
+  <div id="controls">
+    <div class="pill"><span>Város:</span> <span id="city" class="cityName">—</span></div>
+    <button id="newCityBtn" class="btn">Új város</button>
+    <div class="pill">
+      <label for="roundSize">Kör hossza:</label>
+      <input id="roundSize" type="number" min="1" max="200" value="10" />
+      <button id="newRoundBtn" class="btn">Új kör indítása</button>
+    </div>
+    <div class="pill">
+      <label for="goodThresh">„Jó” tipp küszöb (km):</label>
+      <input id="goodThresh" type="number" min="1" max="200" value="25" />
+    </div>
+    <button id="resetBtn" class="btn">Statok reset</button>
+  </div>
+
+  <div style="position:relative;">
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:#66aaff"></i>Pontos hely</span>
+      <span><i class="dot" style="background:#ff7b7b"></i>Kattintás</span>
+      <span>— <strong>vonal</strong>: eltérés</span>
+    </div>
+    <div id="roundBanner" class="roundBanner" style="display:none;">
+      <h3>Kör vége</h3>
+      <p><strong>Eredmény:</strong> <span id="rbResult"></span></p>
+      <p><strong>Összes eltérés:</strong> <span id="rbSum"></span> km | <strong>Átlag:</strong> <span id="rbAvg"></span> km</p>
+      <button id="rbStartNew" class="btn">Új kör ugyanilyen hosszal</button>
+    </div>
+  </div>
+
+  <div id="stats">
+    <div class="stat"><b>Kör</b><div class="val"><span id="roundCount">0</span>/<span id="roundTarget">0</span></div></div>
+    <div class="stat"><b>Jó tipp (≤ küszöb)</b><div class="val good" id="goodCount">0</div></div>
+    <div class="stat"><b>Rossz tipp (&gt; küszöb)</b><div class="val bad" id="badCount">0</div></div>
+    <div class="stat"><b>Jó arány</b><div class="val" id="goodRatio">0%</div></div>
+    <div class="stat"><b>Összes eltérés (kör)</b><div class="val warn" id="sumKm">0</div></div>
+    <div class="stat"><b>Átlag eltérés (kör)</b><div class="val" id="avgKm">0</div></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+  // ——— Városok ———
+  const CITIES = [
+  {n:"Aba", lat:47.029218, lon:18.521661},
+  {n:"Abádszalók", lat:47.476014, lon:20.599775},
+  {n:"Abaújszántó", lat:48.278706, lon:21.185500},
+  {n:"Abony", lat:47.188740, lon:20.004782},
+  {n:"Ács", lat:47.710423, lon:18.015613},
+  {n:"Adony", lat:47.120899, lon:18.863107},
+  {n:"Ajak", lat:48.177850, lon:22.052230},
+  {n:"Ajka", lat:47.105658, lon:17.558728},
+  {n:"Albertirsa", lat:47.245730, lon:19.612783},
+  {n:"Alsózsolca", lat:48.070301, lon:20.881997},
+  {n:"Aszód", lat:47.653273, lon:19.474743},
+  {n:"Bábolna", lat:47.642259, lon:17.978678},
+  {n:"Bácsalmás", lat:46.127413, lon:19.331913},
+  {n:"Badacsonytomaj", lat:46.805799, lon:17.514693},
+  {n:"Baja", lat:46.178547, lon:18.951725},
+  {n:"Baktalórántháza", lat:47.999421, lon:22.079359},
+  {n:"Balassagyarmat", lat:48.076883, lon:19.292604},
+  {n:"Balatonalmádi", lat:47.030277, lon:18.015576},
+  {n:"Balatonboglár", lat:46.778537, lon:17.655333},
+  {n:"Balatonföldvár", lat:46.849120, lon:17.879240},
+  {n:"Balatonfüred", lat:46.956725, lon:17.888892},
+  {n:"Balatonfűzfő", lat:47.062004, lon:18.040968},
+  {n:"Balatonkenese", lat:47.034978, lon:18.107968},
+  {n:"Balatonlelle", lat:46.786762, lon:17.696521},
+  {n:"Balkány", lat:47.770088, lon:21.860132},
+  {n:"Balmazújváros", lat:47.611628, lon:21.343738},
+  {n:"Barcs", lat:45.960513, lon:17.463412},
+  {n:"Bátaszék", lat:46.193211, lon:18.723146},
+  {n:"Bátonyterenye", lat:47.995553, lon:19.827210},
+  {n:"Battonya", lat:46.285868, lon:21.021893},
+  {n:"Békés", lat:46.786299, lon:20.982074},
+  {n:"Békéscsaba", lat:46.679800, lon:21.098543},
+  {n:"Bélapátfalva", lat:48.051718, lon:20.344873},
+  {n:"Beled", lat:47.466113, lon:17.089883},
+  {n:"Berettyóújfalu", lat:47.224727, lon:21.535521},
+  {n:"Berhida", lat:47.110993, lon:18.133937},
+  {n:"Besenyszög", lat:47.296001, lon:20.257149},
+  {n:"Biatorbágy", lat:47.473944, lon:18.823286},
+  {n:"Bicske", lat:47.490707, lon:18.635805},
+  {n:"Biharkeresztes", lat:47.124939, lon:21.717944},
+  {n:"Bodajk", lat:47.322704, lon:18.233096},
+  {n:"Bóly", lat:45.969279, lon:18.516149},
+  {n:"Bonyhád", lat:46.298421, lon:18.532191},
+  {n:"Borsodnádasd", lat:48.123033, lon:20.246177},
+  {n:"Budakalász", lat:47.619279, lon:19.046857},
+  {n:"Budakeszi", lat:47.509944, lon:18.929382},
+  {n:"Budaörs", lat:47.460018, lon:18.954182},
+  {n:"Budapest", lat:47.497879, lon:19.040238},
+  {n:"Bük", lat:47.383396, lon:16.753305},
+  {n:"Cegléd", lat:47.171645, lon:19.797752},
+  {n:"Celldömölk", lat:47.257964, lon:17.152188},
+  {n:"Cigánd", lat:48.257231, lon:21.890493},
+  {n:"Csákvár", lat:47.391804, lon:18.464064},
+  {n:"Csanádpalota", lat:46.244048, lon:20.723398},
+  {n:"Csenger", lat:47.836368, lon:22.679465},
+  {n:"Csepreg", lat:47.401594, lon:16.707842},
+  {n:"Csongrád", lat:46.709762, lon:20.153731},
+  {n:"Csorna", lat:47.613415, lon:17.249796},
+  {n:"Csorvás", lat:46.630412, lon:20.833624},
+  {n:"Csurgó", lat:46.264251, lon:17.095087},
+  {n:"Dabas", lat:47.188612, lon:19.320306},
+  {n:"Debrecen", lat:47.531399, lon:21.625978},
+  {n:"Demecser", lat:48.113700, lon:21.925207},
+  {n:"Derecske", lat:47.353947, lon:21.570917},
+  {n:"Dévaványa", lat:47.031346, lon:20.962097},
+  {n:"Devecser", lat:47.104052, lon:17.436418},
+  {n:"Diósd", lat:47.406256, lon:18.944860},
+  {n:"Dombóvár", lat:46.377899, lon:18.133287},
+  {n:"Dombrád", lat:48.225687, lon:21.924448},
+  {n:"Dorog", lat:47.722378, lon:18.731435},
+  {n:"Dunaföldvár", lat:46.810432, lon:18.922292},
+  {n:"Dunaharaszti", lat:47.359976, lon:19.095336},
+  {n:"Dunakeszi", lat:47.631670, lon:19.129406},
+  {n:"Dunaújváros", lat:46.964905, lon:18.940505},
+  {n:"Dunavarsány", lat:47.278963, lon:19.066105},
+  {n:"Dunavecse", lat:46.916366, lon:18.971654},
+  {n:"Edelény", lat:48.293662, lon:20.733437},
+  {n:"Eger", lat:47.898989, lon:20.374367},
+  {n:"Elek", lat:46.529426, lon:21.252611},
+  {n:"Emőd", lat:47.933947, lon:20.816545},
+  {n:"Encs", lat:48.330574, lon:21.122211},
+  {n:"Enying", lat:46.926934, lon:18.244973},
+  {n:"Ercsi", lat:47.251970, lon:18.898377},
+  {n:"Érd", lat:47.377249, lon:18.921383},
+  {n:"Esztergom", lat:47.785694, lon:18.740338},
+  {n:"Fegyvernek", lat:47.252652, lon:20.525943},
+  {n:"Fehérgyarmat", lat:47.985096, lon:22.516752},
+  {n:"Felsőzsolca", lat:48.104100, lon:20.860540},
+  {n:"Fertőd", lat:47.621635, lon:16.864583},
+  {n:"Fertőszentmiklós", lat:47.589036, lon:16.877178},
+  {n:"Fonyód", lat:46.746752, lon:17.549460},
+  {n:"Fót", lat:47.612587, lon:19.198010},
+  {n:"Füzesabony", lat:47.748539, lon:20.414267},
+  {n:"Füzesgyarmat", lat:47.104558, lon:21.210613},
+  {n:"Gárdony", lat:47.202806, lon:18.626198},
+  {n:"Göd", lat:47.683434, lon:19.134157},
+  {n:"Gödöllő", lat:47.601529, lon:19.347698},
+  {n:"Gönc", lat:48.472488, lon:21.272628},
+  {n:"Gyál", lat:47.384545, lon:19.217307},
+  {n:"Gyomaendrőd", lat:46.935803, lon:20.826092},
+  {n:"Gyömrő", lat:47.422337, lon:19.394503},
+  {n:"Gyöngyös", lat:47.779984, lon:19.929118},
+  {n:"Gyöngyöspata", lat:47.814682, lon:19.790339},
+  {n:"Gyönk", lat:46.555354, lon:18.478327},
+  {n:"Győr", lat:47.687609, lon:17.634681},
+  {n:"Gyula", lat:46.643866, lon:21.274757},
+  {n:"Hajdúböszörmény", lat:47.671662, lon:21.507894},
+  {n:"Hajdúdorog", lat:47.815717, lon:21.500685},
+  {n:"Hajdúhadház", lat:47.684483, lon:21.669185},
+  {n:"Hajdúnánás", lat:47.845224, lon:21.427900},
+  {n:"Hajdúsámson", lat:47.598951, lon:21.753714},
+  {n:"Hajdúszoboszló", lat:47.443129, lon:21.390300},
+  {n:"Hajós", lat:46.398296, lon:19.117218},
+  {n:"Halásztelek", lat:47.363105, lon:18.981144},
+  {n:"Harkány", lat:45.847791, lon:18.235998},
+  {n:"Hatvan", lat:47.668397, lon:19.674387},
+  {n:"Herend", lat:47.132846, lon:17.752336},
+  {n:"Heves", lat:47.788441, lon:20.171441},
+  {n:"Hévíz", lat:46.790604, lon:17.183449},
+  {n:"Hódmezővásárhely", lat:46.417134, lon:20.319607},
+  {n:"Ibrány", lat:48.122594, lon:21.710216},
+  {n:"Igal", lat:46.534547, lon:17.938671},
+  {n:"Isaszeg", lat:47.530333, lon:19.401700},
+  {n:"Izsák", lat:46.800917, lon:19.359537},
+  {n:"Jánoshalma", lat:46.297226, lon:19.323591},
+  {n:"Jánosháza", lat:47.119876, lon:17.164270},
+  {n:"Jánossomorja", lat:47.785923, lon:17.136423},
+  {n:"Jászapáti", lat:47.513723, lon:20.140425},
+  {n:"Jászárokszállás", lat:47.644542, lon:19.978652},
+  {n:"Jászberény", lat:47.503051, lon:19.911789},
+  {n:"Jászfényszaru", lat:47.569231, lon:19.716815},
+  {n:"Jászkisér", lat:47.459436, lon:20.215778},
+  {n:"Kaba", lat:47.357625, lon:21.274264},
+  {n:"Kadarkút", lat:46.228555, lon:17.617872},
+  {n:"Kalocsa", lat:46.523027, lon:18.982504},
+  {n:"Kaposvár", lat:46.356469, lon:17.788689},
+  {n:"Kapuvár", lat:47.593687, lon:17.027474},
+  {n:"Karcag", lat:47.314646, lon:20.924094},
+  {n:"Kazincbarcika", lat:48.254441, lon:20.622325},
+  {n:"Kecel", lat:46.523766, lon:19.253339},
+  {n:"Kecskemét", lat:46.907388, lon:19.691721},
+  {n:"Kemecse", lat:48.067835, lon:21.798693},
+  {n:"Kenderes", lat:47.247747, lon:20.672031},
+  {n:"Kerekegyháza", lat:46.935877, lon:19.482507},
+  {n:"Kerepes", lat:47.561613, lon:19.286907},
+  {n:"Keszthely", lat:46.767508, lon:17.246280},
+  {n:"Kisbér", lat:47.499260, lon:18.030017},
+  {n:"Kisköre", lat:47.499457, lon:20.492504},
+  {n:"Kiskőrös", lat:46.620571, lon:19.284355},
+  {n:"Kiskunfélegyháza", lat:46.711438, lon:19.850165},
+  {n:"Kiskunhalas", lat:46.427850, lon:19.483308},
+  {n:"Kiskunlacháza", lat:47.190339, lon:19.005690},
+  {n:"Kiskunmajsa", lat:46.490623, lon:19.739312},
+  {n:"Kistarcsa", lat:47.544732, lon:19.263638},
+  {n:"Kistelek", lat:46.470461, lon:19.981201},
+  {n:"Kisújszállás", lat:47.216205, lon:20.754667},
+  {n:"Kisvárda", lat:48.225759, lon:22.078425},
+  {n:"Komádi", lat:47.001518, lon:21.488295},
+  {n:"Komárom", lat:47.741735, lon:18.121826},
+  {n:"Komló", lat:46.191167, lon:18.261378},
+  {n:"Kondoros", lat:46.759968, lon:20.795056},
+  {n:"Kozármisleny", lat:46.047823, lon:18.285705},
+  {n:"Körmend", lat:47.016102, lon:16.598090},
+  {n:"Körösladány", lat:46.961818, lon:21.077404},
+  {n:"Kőszeg", lat:47.389495, lon:16.540684},
+  {n:"Kunhegyes", lat:47.369909, lon:20.631829},
+  {n:"Kunszentmárton", lat:46.839905, lon:20.290881},
+  {n:"Kunszentmiklós", lat:47.025710, lon:19.123486},
+  {n:"Lábatlan", lat:47.745085, lon:18.501573},
+  {n:"Lajosmizse", lat:47.026471, lon:19.558264},
+  {n:"Lébény", lat:47.735494, lon:17.390626},
+  {n:"Lengyeltóti", lat:46.667107, lon:17.641104},
+  {n:"Lenti", lat:46.624575, lon:16.536667},
+  {n:"Létavértes", lat:47.385311, lon:21.876409},
+  {n:"Letenye", lat:46.433204, lon:16.723084},
+  {n:"Lőrinci", lat:47.740050, lon:19.677310},
+  {n:"Maglód", lat:47.444962, lon:19.359314},
+  {n:"Mágocs", lat:46.349833, lon:18.228590},
+  {n:"Makó", lat:46.215044, lon:20.475102},
+  {n:"Mándok", lat:48.322146, lon:22.190131},
+  {n:"Marcali", lat:46.583348, lon:17.412300},
+  {n:"Máriapócs", lat:47.879316, lon:22.025871},
+  {n:"Martfű", lat:47.018615, lon:20.281393},
+  {n:"Martonvásár", lat:47.329905, lon:18.768729},
+  {n:"Mátészalka", lat:47.953911, lon:22.320848},
+  {n:"Medgyesegyháza", lat:46.498138, lon:21.028089},
+  {n:"Mélykút", lat:46.215196, lon:19.379210},
+  {n:"Mezőberény", lat:46.824031, lon:21.029094},
+  {n:"Mezőcsát", lat:47.817536, lon:20.903168},
+  {n:"Mezőhegyes", lat:46.313961, lon:20.819408},
+  {n:"Mezőkeresztes", lat:47.829883, lon:20.692248},
+  {n:"Mezőkovácsháza", lat:46.407338, lon:20.923601},
+  {n:"Mezőkövesd", lat:47.809753, lon:20.566089},
+  {n:"Mezőtúr", lat:47.000472, lon:20.629951},
+  {n:"Mindszent", lat:46.524022, lon:20.186003},
+  {n:"Miskolc", lat:48.103064, lon:20.790043},
+  {n:"Mohács", lat:45.993384, lon:18.682108},
+  {n:"Monor", lat:47.352743, lon:19.446840},
+  {n:"Mór", lat:47.372027, lon:18.209039},
+  {n:"Mórahalom", lat:46.216324, lon:19.889481},
+  {n:"Mosonmagyaróvár", lat:47.873179, lon:17.272234},
+  {n:"Nádudvar", lat:47.428557, lon:21.159309},
+  {n:"Nagyatád", lat:46.229143, lon:17.357096},
+  {n:"Nagybajom", lat:46.393658, lon:17.511875},
+  {n:"Nagyecsed", lat:47.862171, lon:22.384304},
+  {n:"Nagyhalász", lat:48.132242, lon:21.759389},
+  {n:"Nagykálló", lat:47.874296, lon:21.843497},
+  {n:"Nagykanizsa", lat:46.454826, lon:16.992392},
+  {n:"Nagykáta", lat:47.413819, lon:19.750374},
+  {n:"Nagykőrös", lat:47.037426, lon:19.786314},
+  {n:"Nagymányok", lat:46.282492, lon:18.459239},
+  {n:"Nagymaros", lat:47.789114, lon:18.958726},
+  {n:"Nyékládháza", lat:47.993947, lon:20.841622},
+  {n:"Nyergesújfalu", lat:47.760708, lon:18.554368},
+  {n:"Nyíradony", lat:47.691359, lon:21.905350},
+  {n:"Nyírbátor", lat:47.839511, lon:22.132231},
+  {n:"Nyírbogát", lat:47.801474, lon:22.062021},
+  {n:"Nyíregyháza", lat:47.955780, lon:21.716798},
+  {n:"Nyírlugos", lat:47.692050, lon:22.041765},
+  {n:"Nyírmada", lat:48.067926, lon:22.187705},
+  {n:"Nyírtelek", lat:48.010267, lon:21.631401},
+  {n:"Ócsa", lat:47.301189, lon:19.231362},
+  {n:"Onga", lat:48.120716, lon:20.912938},
+  {n:"Orosháza", lat:46.560334, lon:20.669348},
+  {n:"Oroszlány", lat:47.489672, lon:18.314709},
+  {n:"Ózd", lat:48.223909, lon:20.289598},
+  {n:"Őrbottyán", lat:47.682758, lon:19.263848},
+  {n:"Őriszentpéter", lat:46.841566, lon:16.418224},
+  {n:"Örkény", lat:47.129759, lon:19.430902},
+  {n:"Pacsa", lat:46.722540, lon:17.009777},
+  {n:"Paks", lat:46.622947, lon:18.858936},
+  {n:"Pálháza", lat:48.471582, lon:21.511081},
+  {n:"Pannonhalma", lat:47.550202, lon:17.754168},
+  {n:"Pápa", lat:47.326109, lon:17.470529},
+  {n:"Pásztó", lat:47.921063, lon:19.699773},
+  {n:"Pécel", lat:47.491120, lon:19.344680},
+  {n:"Pécs", lat:46.076509, lon:18.228032},
+  {n:"Pécsvárad", lat:46.160841, lon:18.420694},
+  {n:"Pétervására", lat:48.019207, lon:20.098374},
+  {n:"Pilis", lat:47.286070, lon:19.546741},
+  {n:"Piliscsaba", lat:47.632942, lon:18.826123},
+  {n:"Pilisvörösvár", lat:47.621082, lon:18.911575},
+  {n:"Polgár", lat:47.870794, lon:21.114103},
+  {n:"Polgárdi", lat:47.056398, lon:18.306794},
+  {n:"Pomáz", lat:47.646821, lon:19.023630},
+  {n:"Pusztaszabolcs", lat:47.138578, lon:18.757609},
+  {n:"Putnok", lat:48.294261, lon:20.434287},
+  {n:"Püspökladány", lat:47.319604, lon:21.112252},
+  {n:"Rácalmás", lat:47.025902, lon:18.939328},
+  {n:"Ráckeve", lat:47.160976, lon:18.943627},
+  {n:"Rakamaz", lat:48.122180, lon:21.477514},
+  {n:"Rákóczifalva", lat:47.089819, lon:20.234337},
+  {n:"Répcelak", lat:47.419509, lon:17.015429},
+  {n:"Rétság", lat:47.930324, lon:19.137590},
+  {n:"Rudabánya", lat:48.373781, lon:20.622451},
+  {n:"Sajóbábony", lat:48.175043, lon:20.738743},
+  {n:"Sajószentpéter", lat:48.218354, lon:20.708776},
+  {n:"Salgótarján", lat:48.096068, lon:19.800564},
+  {n:"Sándorfalva", lat:46.365736, lon:20.104217},
+  {n:"Sárbogárd", lat:46.887437, lon:18.619625},
+  {n:"Sarkad", lat:46.742287, lon:21.383648},
+  {n:"Sárospatak", lat:48.321682, lon:21.565552},
+  {n:"Sárvár", lat:47.251743, lon:16.934217},
+  {n:"Sásd", lat:46.255956, lon:18.106560},
+  {n:"Sátoraljaújhely", lat:48.396098, lon:21.656150},
+  {n:"Sellye", lat:45.873544, lon:17.851405},
+  {n:"Siklós", lat:45.852145, lon:18.298382},
+  {n:"Simontornya", lat:46.756962, lon:18.543513},
+  {n:"Siófok", lat:46.907169, lon:18.054160},
+  {n:"Solt", lat:46.802256, lon:19.004644},
+  {n:"Soltvadkert", lat:46.582020, lon:19.394273},
+  {n:"Sopron", lat:47.680306, lon:16.598346},
+  {n:"Sülysáp", lat:47.454261, lon:19.521483},
+  {n:"Sümeg", lat:46.978433, lon:17.281166},
+  {n:"Szabadszállás", lat:46.875232, lon:19.222502},
+  {n:"Szarvas", lat:46.862143, lon:20.552147},
+  {n:"Százhalombatta", lat:47.317199, lon:18.912095},
+  {n:"Szécsény", lat:48.080251, lon:19.520681},
+  {n:"Szeged", lat:46.254631, lon:20.148602},
+  {n:"Szeghalom", lat:47.021349, lon:21.169393},
+  {n:"Székesfehérvár", lat:47.191017, lon:18.410811},
+  {n:"Szekszárd", lat:46.348488, lon:18.701663},
+  {n:"Szendrő", lat:48.403003, lon:20.732480},
+  {n:"Szentendre", lat:47.667761, lon:19.076047},
+  {n:"Szentes", lat:46.652405, lon:20.256641},
+  {n:"Szentgotthárd", lat:46.952851, lon:16.274854},
+  {n:"Szentlőrinc", lat:46.041561, lon:17.988914},
+  {n:"Szerencs", lat:48.163385, lon:21.201088},
+  {n:"Szigethalom", lat:47.324507, lon:19.000188},
+  {n:"Szigetszentmiklós", lat:47.345765, lon:19.040904},
+  {n:"Szigetvár", lat:46.047440, lon:17.799351},
+  {n:"Szikszó", lat:48.201524, lon:20.927502},
+  {n:"Szob", lat:47.818292, lon:18.871133},
+  {n:"Szolnok", lat:47.175383, lon:20.194628},
+  {n:"Szombathely", lat:47.229118, lon:16.618762},
+  {n:"Tab", lat:46.735101, lon:18.037519},
+  {n:"Tamási", lat:46.629398, lon:18.285033},
+  {n:"Tápiószele", lat:47.332063, lon:19.875582},
+  {n:"Tapolca", lat:46.882097, lon:17.438962},
+  {n:"Tát", lat:47.739804, lon:18.654371},
+  {n:"Tata", lat:47.651621, lon:18.328208},
+  {n:"Tatabánya", lat:47.583845, lon:18.397986},
+  {n:"Téglás", lat:47.715689, lon:21.674633},
+  {n:"Tét", lat:47.515952, lon:17.516668},
+  {n:"Tiszacsege", lat:47.697548, lon:20.993597},
+  {n:"Tiszaföldvár", lat:46.980354, lon:20.254117},
+  {n:"Tiszafüred", lat:47.613088, lon:20.750226},
+  {n:"Tiszakécske", lat:46.931529, lon:20.104536},
+  {n:"Tiszalök", lat:48.017176, lon:21.374966},
+  {n:"Tiszaújváros", lat:47.928034, lon:21.046706},
+  {n:"Tiszavasvári", lat:47.956619, lon:21.368053},
+  {n:"Tokaj", lat:48.123553, lon:21.411389},
+  {n:"Tolna", lat:46.488345, lon:18.505001},
+  {n:"Tompa", lat:46.204929, lon:19.537401},
+  {n:"Tótkomlós", lat:46.411510, lon:20.736604},
+  {n:"Tököl", lat:47.322679, lon:18.963243},
+  {n:"Törökbálint", lat:47.434958, lon:18.913031},
+  {n:"Törökszentmiklós", lat:47.179357, lon:20.409153},
+  {n:"Tura", lat:47.609350, lon:19.594944},
+  {n:"Túrkeve", lat:47.109245, lon:20.735806},
+  {n:"Újfehértó", lat:47.800898, lon:21.682993},
+  {n:"Újhartyán", lat:47.220019, lon:19.384105},
+  {n:"Újkígyós", lat:46.595216, lon:21.024918},
+  {n:"Újszász", lat:47.284443, lon:20.070268},
+  {n:"Üllő", lat:47.385061, lon:19.345326},
+  {n:"Vác", lat:47.778287, lon:19.127829},
+  {n:"Vaja", lat:47.999067, lon:22.171513},
+  {n:"Vámospércs", lat:47.526729, lon:21.898716},
+  {n:"Várpalota", lat:47.200618, lon:18.139978},
+  {n:"Vásárosnamény", lat:48.126764, lon:22.312647},
+  {n:"Vasvár", lat:47.049065, lon:16.799882},
+  {n:"Vecsés", lat:47.406897, lon:19.264307},
+  {n:"Velence", lat:47.235318, lon:18.660526},
+  {n:"Vép", lat:47.230818, lon:16.723032},
+  {n:"Veresegyház", lat:47.655235, lon:19.286881},
+  {n:"Verpelét", lat:47.849011, lon:20.227911},
+  {n:"Veszprém", lat:47.093382, lon:17.908041},
+  {n:"Vésztő", lat:46.924198, lon:21.259880},
+  {n:"Villány", lat:45.869764, lon:18.455521},
+  {n:"Visegrád", lat:47.784581, lon:18.970337},
+  {n:"Záhony", lat:48.402906, lon:22.178768},
+  {n:"Zalaegerszeg", lat:46.841580, lon:16.845632},
+  {n:"Zalakaros", lat:46.560786, lon:17.122153},
+  {n:"Zalalövő", lat:46.846198, lon:16.585229},
+  {n:"Zalaszentgrót", lat:46.943802, lon:17.079020},
+  {n:"Zamárdi", lat:46.880099, lon:17.945946},
+  {n:"Zirc", lat:47.261379, lon:17.871819},
+  {n:"Zsámbék", lat:47.548311, lon:18.717434}
+];
+
+  // ——— Állapot ———
+  let map, actualMarker=null, clickMarker=null, lineLayer=null;
+  let currentCity=null, roundTarget=10, roundCount=0, roundSumKm=0, good=0, bad=0;
+  let waitingForGuess=false, roundPool=[];
+
+  // ——— Segéd ———
+  const $ = s => document.querySelector(s);
+  const fmt = n => n.toLocaleString('hu-HU');
+  const fmt1 = n => (Math.round(n*10)/10).toLocaleString('hu-HU',{minimumFractionDigits:1,maximumFractionDigits:1});
+  function haversineKm(a,b,c,d){const R=6371,t=x=>x*Math.PI/180, dLat=t(c-a), dLon=t(d-b);
+    const k=Math.sin(dLat/2)**2+Math.cos(t(a))*Math.cos(t(c))*Math.sin(dLon/2)**2; return R*2*Math.asin(Math.sqrt(k));}
+  function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a;}
+  function updateStats(){ $('#roundCount').textContent=roundCount; $('#roundTarget').textContent=roundTarget;
+    $('#sumKm').textContent=fmt1(roundSumKm); $('#avgKm').textContent=fmt1(roundCount?roundSumKm/roundCount:0);
+    $('#goodCount').textContent=fmt(good); $('#badCount').textContent=fmt(bad);
+    $('#goodRatio').textContent=(good+bad?Math.round(good/(good+bad)*100):0)+'%';}
+  function clearLayers(){ if(actualMarker){map.removeLayer(actualMarker);actualMarker=null}
+    if(clickMarker){map.removeLayer(clickMarker);clickMarker=null}
+    if(lineLayer){map.removeLayer(lineLayer);lineLayer=null}}
+  function showRoundBanner(){ $('#rbResult').textContent=`${fmt(good)} jó / ${fmt(bad)} rossz (${Math.round(good/(good+bad)*100||0)}%)`;
+    $('#rbSum').textContent=fmt1(roundSumKm); $('#rbAvg').textContent=fmt1(roundCount?roundSumKm/roundCount:0);
+    $('#roundBanner').style.display='block';}
+  function hideRoundBanner(){ $('#roundBanner').style.display='none';}
+  function startNewRound(){ roundTarget=Math.max(1,Math.min(200,parseInt($('#roundSize').value||'10',10)));
+    roundCount=0;roundSumKm=0;good=0;bad=0;roundPool=shuffle([...CITIES]);updateStats();hideRoundBanner();nextCity();}
+  function nextCity(){
+    if(roundCount>=roundTarget){waitingForGuess=false;$('#city').textContent='—';showRoundBanner();return;}
+    if(roundPool.length===0) roundPool=shuffle([...CITIES]);
+    currentCity=roundPool.pop(); $('#city').textContent=currentCity.n;
+    clearLayers(); waitingForGuess=true; $('#newCityBtn').disabled=true;
+  }
+  function handleGuess(latlng){
+    if(!waitingForGuess||!currentCity)return; waitingForGuess=false;
+    const dKm=haversineKm(latlng.lat,latlng.lng,currentCity.lat,currentCity.lon);
+    roundSumKm+=dKm; roundCount++;
+    const thresh=Math.max(1,parseInt($('#goodThresh').value||'25',10)); if(dKm<=thresh)good++;else bad++;
+    clearLayers();
+    actualMarker=L.circleMarker([currentCity.lat,currentCity.lon],{radius:9,color:'#66aaff',weight:3,fillOpacity:0.95}).addTo(map);
+    clickMarker=L.circleMarker([latlng.lat,latlng.lng],{radius:8,color:'#ff7b7b',weight:3,fillOpacity:0.85}).addTo(map);
+    lineLayer=L.polyline([[currentCity.lat,currentCity.lon],[latlng.lat,latlng.lng]],{weight:4,opacity:0.9}).addTo(map);
+    actualMarker.bindPopup(`<b>${currentCity.n}</b><br/>Eltérés: <b>${fmt1(dKm)} km</b><br/>${dKm<=thresh?'<span style="color:#23d18b">Jó tipp!</span>':'<span style="color:#ff5370">Mellément.</span>'}`).openPopup();
+    updateStats(); $('#newCityBtn').disabled=false;
+  }
+
+  // ——— Térkép + Zöld határ/folyó/tó overlay ———
+  const HU_BOUNDS = {minLat:45.6, minLon:15.8, maxLat:48.7, maxLon:23.0};
+  function bboxHit(coords){
+    // Gyors & elég pontos bbox-szűrés: ellenőrzi, hogy bármely koordináta a HU BBOX-ban van
+    function inB(lat,lon){return lat>=HU_BOUNDS.minLat && lat<=HU_BOUNDS.maxLat && lon>=HU_BOUNDS.minLon && lon<=HU_BOUNDS.maxLon;}
+    function scan(c){
+      if(typeof c[0]==="number"){ return inB(c[1],c[0]); }  // [lon,lat]
+      for(const x of c){ if(scan(x)) return true; }
+      return false;
+    }
+    return scan(coords);
+  }
+
+  function addGreenLayers(){
+    // Országhatár – Countries 50m
+    fetch('https://geojson.xyz/naturalearth-3.3.0/ne_50m_admin_0_countries.geojson')
+      .then(r=>r.json())
+      .then(g=>{
+        const huFeat = g.features.find(f => (f.properties?.ADMIN||f.properties?.admin)==='Hungary');
+        if(!huFeat) return;
+        L.geoJSON(huFeat, {
+          style: { color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#00e676',
+                   weight: 3, fillOpacity: 0 }
+        }).addTo(map);
+      });
+
+    // Folyók – Rivers centerlines 50m (szűrjük BBOX-ra)
+    fetch('https://geojson.xyz/naturalearth-3.3.0/ne_50m_rivers_lake_centerlines.geojson')
+      .then(r=>r.json())
+      .then(g=>{
+        const feats = g.features.filter(f => bboxHit(f.geometry.coordinates));
+        L.geoJSON({type:'FeatureCollection',features:feats},{
+          style:{ color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#00e676',
+                  weight: 2, opacity: 0.9 }
+        }).addTo(map);
+      });
+
+    // Tavak – Lakes 50m (szűrjük BBOX-ra), zöld kontúr + halvány zöld kitöltés
+    fetch('https://geojson.xyz/naturalearth-3.3.0/ne_50m_lakes.geojson')
+      .then(r=>r.json())
+      .then(g=>{
+        const feats = g.features.filter(f => bboxHit(f.geometry.coordinates));
+        L.geoJSON({type:'FeatureCollection',features:feats},{
+          style:{ color: getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#00e676',
+                  weight: 2, fillColor: '#00e676', fillOpacity: 0.08 }
+        }).addTo(map);
+      });
+  }
+
+  function initMap(){
+    map = L.map('map',{minZoom:6,maxZoom:13,zoomSnap:0.25,zoomDelta:0.5}).setView([47.2,19.5],7);
+
+    // Sötét, felirat nélküli alap
+    L.tileLayer('https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_nolabels/{z}/{x}/{y}{r}.png',{
+      subdomains:'abcd',maxZoom:19,
+      attribution:'&copy; OpenStreetMap &copy; <a href="https://carto.com/">CARTO</a>'
+    }).addTo(map);
+
+    // Zöld határ/folyó/tó rétegek
+    addGreenLayers();
+
+    // Magyarország korlátozás
+    const bounds=L.latLngBounds([HU_BOUNDS.minLat,HU_BOUNDS.minLon],[HU_BOUNDS.maxLat,HU_BOUNDS.maxLon]);
+    map.setMaxBounds(bounds);
+    map.on('drag',()=>map.panInsideBounds(bounds,{animate:false}));
+
+    map.on('click', e => handleGuess(e.latlng));
+  }
+
+  // ——— Események ———
+  window.addEventListener('DOMContentLoaded',()=>{
+    initMap(); updateStats(); startNewRound();
+    $('#newCityBtn').addEventListener('click',()=>nextCity());
+    $('#newRoundBtn').addEventListener('click',()=>startNewRound());
+    $('#rbStartNew').addEventListener('click',()=>startNewRound());
+    $('#resetBtn').addEventListener('click',()=>{
+      roundCount=0; roundSumKm=0; good=0; bad=0;
+      updateStats(); clearLayers(); $('#city').textContent='—'; waitingForGuess=false; hideRoundBanner();
+    });
+  });
+</script>
+</body>
+</html>
